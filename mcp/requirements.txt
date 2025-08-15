@@ -1,0 +1,10 @@
+httpx
+typing-extensions
+
+# MCP 服务器依赖
+mcp
+
+# HTTP请求依赖
+requests
+aiohttp
+
