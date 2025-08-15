@@ -12,7 +12,7 @@ if [ ! -d "dist" ]; then
 fi
 
 # 检查构建文件
-if [ ! -f "dist/excalidraw_mcp_server-1.0.2.tar.gz" ] || [ ! -f "dist/excalidraw_mcp_server-1.0.2-py3-none-any.whl" ]; then
+if [ ! -f "dist/excalidraw_mcp_server-1.0.3.tar.gz" ] || [ ! -f "dist/excalidraw_mcp_server-1.0.3-py3-none-any.whl" ]; then
     echo "❌ 构建文件不完整，请重新构建:"
     echo "   python3 -m build"
     exit 1

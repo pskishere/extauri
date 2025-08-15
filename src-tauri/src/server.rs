@@ -421,15 +421,33 @@ fn convert_element_to_svg(element: &Value) -> Option<String> {
             ))
         }
         "text" => {
-            let text_content = element.get("text")?.as_str().unwrap_or("");
-            let font_size = element.get("fontSize")?.as_f64().unwrap_or(16.0);
+            let text_content = element.get("text").and_then(|v| v.as_str()).unwrap_or("[text]");
+            let font_size = element.get("fontSize").and_then(|v| v.as_f64()).unwrap_or(16.0);
+            let text_align = element.get("textAlign").and_then(|v| v.as_str()).unwrap_or("left");
+            let font_family = element.get("fontFamily").and_then(|v| v.as_i64()).unwrap_or(1);
+            
+            let font_family_name = match font_family {
+                1 => "Virgil",
+                2 => "Helvetica",
+                3 => "Cascadia",
+                _ => "Virgil",
+            };
+            
+            let anchor = match text_align {
+                "center" => "middle",
+                "right" => "end",
+                _ => "start",
+            };
+            
             Some(format!(
-                r#"<text x="{}" y="{}" font-size="{}" fill="{}">{}</text>"#,
+                r#"<text x="{}" y="{}" font-size="{}" font-family="{}" text-anchor="{}" fill="{}" dominant-baseline="hanging">{}</text>"#,
                 x,
-                y + font_size,
+                y,
                 font_size,
+                font_family_name,
+                anchor,
                 stroke_color,
-                text_content
+text_content.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;")
             ))
         }
         _ => {

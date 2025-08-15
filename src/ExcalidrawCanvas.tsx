@@ -62,6 +62,28 @@ export function ExcalidrawCanvas() {
                   version: Number(cleanElement.version) || 1
                 };
 
+                // 为文本元素添加特有属性
+                if (cleanElement.type === 'text') {
+                  baseElement.text = cleanElement.text || '';
+                  baseElement.fontSize = Number(cleanElement.fontSize) || 20;
+                  baseElement.fontFamily = Number(cleanElement.fontFamily) || 1;
+                  baseElement.textAlign = cleanElement.textAlign || 'left';
+                  baseElement.verticalAlign = cleanElement.verticalAlign || 'top';
+                  baseElement.containerId = cleanElement.containerId || null;
+                  baseElement.originalText = cleanElement.originalText || cleanElement.text || '';
+                  baseElement.lineHeight = Number(cleanElement.lineHeight) || 1.25;
+                }
+
+                // 为箭头元素添加特有属性
+                if (cleanElement.type === 'arrow' || cleanElement.type === 'line') {
+                  baseElement.points = Array.isArray(cleanElement.points) ? cleanElement.points : [[0, 0], [100, 100]];
+                  baseElement.lastCommittedPoint = cleanElement.lastCommittedPoint || null;
+                  baseElement.startBinding = cleanElement.startBinding || null;
+                  baseElement.endBinding = cleanElement.endBinding || null;
+                  baseElement.startArrowhead = cleanElement.startArrowhead || null;
+                  baseElement.endArrowhead = cleanElement.endArrowhead || 'arrow';
+                }
+
                 // 添加处理后的元素
                 processedElements.push(baseElement);
               });
