@@ -1,7 +1,7 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 mod server;
 
-use tracing::{info, error};
+use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tauri::command]
@@ -18,14 +18,16 @@ fn init_logging() {
                 .with_thread_ids(true)
                 .with_thread_names(true)
                 .with_file(true)
-                .with_line_number(true)
+                .with_line_number(true),
         )
-        .with(tracing_subscriber::EnvFilter::from_default_env()
-            .add_directive("extauri_lib=info".parse().unwrap())
-            .add_directive("http_server=info".parse().unwrap())
-            .add_directive("canvas_update=info".parse().unwrap())
-            .add_directive("canvas_clear=info".parse().unwrap())
-            .add_directive("server_startup=info".parse().unwrap()))
+        .with(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive("extauri_lib=info".parse().unwrap())
+                .add_directive("http_server=info".parse().unwrap())
+                .add_directive("canvas_update=info".parse().unwrap())
+                .add_directive("canvas_clear=info".parse().unwrap())
+                .add_directive("server_startup=info".parse().unwrap()),
+        )
         .init();
 }
 
@@ -33,9 +35,9 @@ fn init_logging() {
 pub fn run() {
     // 初始化JSON格式日志
     init_logging();
-    
+
     info!("应用程序启动");
-    
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
