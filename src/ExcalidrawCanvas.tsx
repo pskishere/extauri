@@ -43,6 +43,9 @@ export function ExcalidrawCanvas() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [canvasData, setCanvasData] = useState<any>(null);
   const [isInitialized, setIsInitialized] = useState(false);
+  const isUpdatingFromRestore = useRef(false); // 防止数据恢复时触发onChange的标志
+  const saveTimeoutRef = useRef<number | null>(null); // 防抖定时器
+  const lastSaveDataRef = useRef<string>(''); // 上次保存的数据哈希
 
   // 初始化IndexedDB并恢复画布数据
   useEffect(() => {
@@ -57,21 +60,49 @@ export function ExcalidrawCanvas() {
           console.warn('⚠️ 数据修复失败，将使用空画布');
         }
 
-        // 尝试从本地存储恢复画布数据
-        const savedData = await indexedDBService.loadCanvasData();
-        if (savedData && apiRef.current) {
-          console.log('🔄 从IndexedDB恢复画布数据:', savedData.elements.length, '个元素');
+        // 应用启动时从后端同步数据
+        let backendData = null;
+        try {
+          console.log('📥 应用启动时从后端同步数据...');
+          const response = await fetch('http://localhost:31337/canvas');
+          if (response.ok) {
+            const data = await response.json();
+            if (data.canvas && data.canvas.elements) {
+              backendData = data.canvas;
+              console.log('✅ 从后端获取到画布数据:', data.canvas.elements.length, '个元素');
+
+              // 将后端数据保存到本地
+              await indexedDBService.saveCanvasData(data.canvas.elements, data.canvas.appState || {});
+              console.log('💾 后端数据已同步到本地存储');
+            }
+          }
+        } catch (error) {
+          console.warn('⚠️ 从后端同步数据失败，使用本地数据:', error);
+        }
+
+        // 优先使用后端数据，如果没有则使用本地数据
+        let dataToRestore = backendData;
+        if (!dataToRestore) {
+          const savedData = await indexedDBService.loadCanvasData();
+          if (savedData && savedData.elements) {
+            dataToRestore = savedData;
+            console.log('📂 使用本地IndexedDB数据:', savedData.elements.length, '个元素');
+          }
+        }
+
+        if (dataToRestore && apiRef.current) {
+          console.log('🔄 恢复画布数据:', dataToRestore.elements.length, '个元素');
           // 确保appState包含必需的collaborators属性
-          const safeAppState = ensureCollaboratorsMap(savedData.appState);
+          const safeAppState = ensureCollaboratorsMap(dataToRestore.appState);
 
           apiRef.current.updateScene({
-            elements: savedData.elements,
+            elements: dataToRestore.elements,
             appState: safeAppState,
-            files: {}
+            files: dataToRestore.files || {}
           });
           console.log('✅ 画布数据恢复成功');
         } else {
-          console.log('📭 IndexedDB中没有保存的画布数据');
+          console.log('📭 没有找到可恢复的画布数据');
         }
       } catch (error) {
         console.error('❌ IndexedDB初始化失败:', error);
@@ -91,44 +122,223 @@ export function ExcalidrawCanvas() {
     }
   }, [apiRef.current, isInitialized]);
 
+  // 组件卸载时清理防抖定时器
+  useEffect(() => {
+    return () => {
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  // 提取画布更新处理逻辑为独立函数
+  const handleCanvasUpdate = async (payload: DrawPayload) => {
+    console.log("🎨 处理画布更新:", payload);
+    console.log("📦 payload:", JSON.stringify(payload, null, 2));
+
+    if (apiRef.current) {
+      console.log("✅ apiRef.current 存在，准备更新画布元素");
+
+      try {
+        // 确保元素数组存在且格式正确
+        const elements = Array.isArray(payload.elements) ? payload.elements : [];
+        console.log("🔍 准备更新的元素数量:", elements.length);
+        console.log("🔍 元素内容:", elements);
+
+        if (elements.length > 0) {
+          // 处理元素，确保所有必需字段都存在
+          const processedElements: any[] = [];
+
+          elements.forEach((element: any, index: number) => {
+            // 深度克隆元素，避免修改原始对象
+            const cleanElement = { ...element };
+
+            // 确保所有必需字段都存在且类型正确
+            const baseElement = {
+              ...cleanElement,
+              id: cleanElement.id || `element_${Date.now()}_${index}`,
+              seed: cleanElement.seed || Math.floor(Math.random() * 1000000),
+              versionNonce: cleanElement.versionNonce || Math.floor(Math.random() * 1000000),
+              groupIds: Array.isArray(cleanElement.groupIds) ? cleanElement.groupIds : [],
+              boundElements: cleanElement.boundElements || null,
+              updated: cleanElement.updated || Date.now(),
+              link: cleanElement.link || null,
+              locked: Boolean(cleanElement.locked),
+              frameId: cleanElement.frameId || null,
+              strokeColor: cleanElement.strokeColor || "#000000",
+              backgroundColor: cleanElement.backgroundColor || "transparent",
+              isDeleted: Boolean(cleanElement.isDeleted),
+              opacity: Number(cleanElement.opacity) || 100,
+              roughness: Number(cleanElement.roughness) || 1,
+              strokeWidth: Number(cleanElement.strokeWidth) || 1,
+              angle: Number(cleanElement.angle) || 0,
+              version: Number(cleanElement.version) || 1
+            };
+
+            // 为文本元素添加特有属性
+            if (cleanElement.type === 'text') {
+              baseElement.text = cleanElement.text || '';
+              baseElement.fontSize = Number(cleanElement.fontSize) || 20;
+              baseElement.fontFamily = Number(cleanElement.fontFamily) || 1;
+              baseElement.textAlign = cleanElement.textAlign || 'left';
+              baseElement.verticalAlign = cleanElement.verticalAlign || 'top';
+              baseElement.containerId = cleanElement.containerId || null;
+              baseElement.originalText = cleanElement.originalText || cleanElement.text || '';
+              baseElement.lineHeight = Number(cleanElement.lineHeight) || 1.25;
+            }
+
+            // 为箭头元素添加特有属性
+            if (cleanElement.type === 'arrow' || cleanElement.type === 'line') {
+              baseElement.points = Array.isArray(cleanElement.points) ? cleanElement.points : [[0, 0], [100, 100]];
+              baseElement.lastCommittedPoint = cleanElement.lastCommittedPoint || null;
+              baseElement.startBinding = cleanElement.startBinding || null;
+              baseElement.endBinding = cleanElement.endBinding || null;
+              baseElement.startArrowhead = cleanElement.startArrowhead || null;
+              baseElement.endArrowhead = cleanElement.endArrowhead || 'arrow';
+            }
+
+            // 为自由绘制元素添加特有属性
+            if (cleanElement.type === 'freedraw') {
+              // 确保points数组格式正确，freedraw需要points数组来定义绘制路径
+              baseElement.points = Array.isArray(cleanElement.points) ? cleanElement.points : [];
+              baseElement.pressures = Array.isArray(cleanElement.pressures) ? cleanElement.pressures : [];
+              baseElement.simulatePressure = Boolean(cleanElement.simulatePressure);
+              baseElement.lastCommittedPoint = cleanElement.lastCommittedPoint || null;
+            }
+
+            // 添加处理后的元素
+            processedElements.push(baseElement);
+          });
+
+          console.log("🔍 处理后的元素:", processedElements);
+
+          // 直接替换所有元素（移除Scene概念，直接操作元素数组）
+          try {
+            // 设置标志，防止事件更新触发onChange
+            isUpdatingFromRestore.current = true;
+
+            // 确保appState包含必需的collaborators属性
+            const safeAppState = ensureCollaboratorsMap(payload.appState);
+
+            apiRef.current.updateScene({
+              elements: processedElements,
+              appState: safeAppState,
+              files: payload.files || {}
+            });
+            console.log("✅ 画布元素更新成功，元素数量:", processedElements.length);
+
+            // 清除标志
+            setTimeout(() => {
+              isUpdatingFromRestore.current = false;
+            }, 100);
+
+            // 同步后端数据到IndexedDB
+            try {
+              await indexedDBService.saveCanvasData(processedElements, payload.appState || {});
+              console.log("💾 后端数据已同步到IndexedDB");
+            } catch (error) {
+              console.error("❌ 同步到IndexedDB失败:", error);
+            }
+
+            // 注意：绘制操作不需要同步到后端，因为绘制事件本身就是从后端发起的
+            console.log("ℹ️ 绘制操作来自后端，无需同步");
+          } catch (error) {
+            console.error("❌ 画布元素更新失败:", error);
+            // 尝试仅更新元素
+            try {
+              // 设置标志，防止简化版更新触发onChange
+              isUpdatingFromRestore.current = true;
+
+              const safeAppState = ensureCollaboratorsMap(payload.appState);
+              apiRef.current.updateScene({
+                elements: processedElements,
+                appState: safeAppState
+              });
+              console.log("✅ 简化版画布元素更新成功");
+
+              // 清除标志
+              setTimeout(() => {
+                isUpdatingFromRestore.current = false;
+              }, 100);
+
+              // 同步简化版更新到IndexedDB
+              try {
+                await indexedDBService.saveCanvasData(processedElements, payload.appState || {});
+                console.log("💾 简化版数据已同步到IndexedDB");
+              } catch (error) {
+                console.error("❌ 简化版数据同步到IndexedDB失败:", error);
+              }
+            } catch (simpleError) {
+              console.error("❌ 简化版画布元素更新也失败:", simpleError);
+            }
+          }
+        } else {
+          // 清空画布元素
+          // 设置标志，防止清空操作触发onChange
+          isUpdatingFromRestore.current = true;
+
+          const safeAppState = ensureCollaboratorsMap(payload.appState);
+          apiRef.current.updateScene({
+            elements: [],
+            appState: safeAppState,
+            files: payload.files || {}
+          });
+          console.log("⚠️ 画布已清空");
+
+          // 清除标志
+          setTimeout(() => {
+            isUpdatingFromRestore.current = false;
+          }, 100);
+
+          // 同步清空操作到IndexedDB
+          try {
+            await indexedDBService.clearCanvasData();
+            console.log("💾 IndexedDB数据已清空");
+          } catch (error) {
+            console.error("❌ 清空IndexedDB失败:", error);
+          }
+        }
+      } catch (error) {
+        console.error("❌ 处理画布更新失败:", error);
+      }
+    } else {
+      console.log("❌ apiRef.current 不存在，无法更新画布");
+    }
+  };
+
   useEffect(() => {
     let unlisten: UnlistenFn | null = null;
 
     if (!isTauri) {
-      console.log("⚠️ 非Tauri环境，设置模拟事件监听器用于开发测试");
+      console.log("⚠️ 非Tauri环境，启用轮询机制检测后端数据变化");
 
-      // 在开发环境中，设置一个定时器来模拟从后端获取数据
+      // 在浏览器环境中使用轮询机制检测后端数据变化
+      let lastUpdateTime = '';
       const pollInterval = setInterval(async () => {
         try {
           const response = await fetch('http://localhost:31337/canvas');
           if (response.ok) {
             const data = await response.json();
-            if (data.canvas && data.canvas.elements && data.canvas.elements.length > 0) {
-              console.log('🎨 从后端获取到画布数据:', data.canvas.elements.length, '个元素');
+            const canvas = data.canvas;
 
-              if (apiRef.current) {
-                // 确保appState包含必需的collaborators属性
-                const safeAppState = ensureCollaboratorsMap(data.canvas.appState);
+            // 检查数据是否有更新
+            if (canvas && canvas.updated_at && canvas.updated_at !== lastUpdateTime) {
+              lastUpdateTime = canvas.updated_at;
+              console.log('🔄 检测到后端数据更新，同步到画布');
 
-                apiRef.current.updateScene({
-                  elements: data.canvas.elements,
-                  appState: safeAppState,
-                  files: data.canvas.files || {}
-                });
-                console.log('✅ 画布更新成功');
+              // 模拟 Tauri 事件处理逻辑
+              const payload = {
+                elements: canvas.elements,
+                appState: canvas.app_state,
+                files: canvas.files
+              };
 
-                // 同步轮询数据到IndexedDB
-                try {
-                  await indexedDBService.saveCanvasData(data.canvas.elements, data.canvas.appState || {});
-                  console.log('💾 轮询数据已同步到IndexedDB');
-                } catch (error) {
-                  console.error('❌ 轮询数据同步到IndexedDB失败:', error);
-                }
-              }
+              // 处理画布更新
+              await handleCanvasUpdate(payload);
             }
           }
         } catch (error) {
-          // 静默处理错误，避免控制台噪音
+          console.warn('⚠️ 轮询后端数据失败:', error);
         }
       }, 1000); // 每秒检查一次
 
@@ -142,158 +352,11 @@ export function ExcalidrawCanvas() {
       console.log("📍 当前时间:", new Date().toISOString());
 
       unlisten = await listen<DrawPayload>("excalidraw_draw", async (event) => {
-        console.log("🎨 收到绘制事件:", event);
-        console.log("📦 事件payload:", JSON.stringify(event.payload, null, 2));
+        console.log("🎨 收到Tauri绘制事件:", event);
         const payload = event.payload as DrawPayload;
 
-        if (apiRef.current) {
-          console.log("✅ apiRef.current 存在，准备更新画布元素");
-
-          try {
-            // 确保元素数组存在且格式正确
-            const elements = Array.isArray(payload.elements) ? payload.elements : [];
-            console.log("🔍 准备更新的元素数量:", elements.length);
-            console.log("🔍 元素内容:", elements);
-
-            if (elements.length > 0) {
-              // 处理元素，确保所有必需字段都存在
-              const processedElements: any[] = [];
-
-              elements.forEach((element: any, index: number) => {
-                // 深度克隆元素，避免修改原始对象
-                const cleanElement = { ...element };
-
-                // 确保所有必需字段都存在且类型正确
-                const baseElement = {
-                  ...cleanElement,
-                  id: cleanElement.id || `element_${Date.now()}_${index}`,
-                  seed: cleanElement.seed || Math.floor(Math.random() * 1000000),
-                  versionNonce: cleanElement.versionNonce || Math.floor(Math.random() * 1000000),
-                  groupIds: Array.isArray(cleanElement.groupIds) ? cleanElement.groupIds : [],
-                  boundElements: cleanElement.boundElements || null,
-                  updated: cleanElement.updated || Date.now(),
-                  link: cleanElement.link || null,
-                  locked: Boolean(cleanElement.locked),
-                  frameId: cleanElement.frameId || null,
-                  strokeColor: cleanElement.strokeColor || "#000000",
-                  backgroundColor: cleanElement.backgroundColor || "transparent",
-                  isDeleted: Boolean(cleanElement.isDeleted),
-                  opacity: Number(cleanElement.opacity) || 100,
-                  roughness: Number(cleanElement.roughness) || 1,
-                  strokeWidth: Number(cleanElement.strokeWidth) || 1,
-                  angle: Number(cleanElement.angle) || 0,
-                  version: Number(cleanElement.version) || 1
-                };
-
-                // 为文本元素添加特有属性
-                if (cleanElement.type === 'text') {
-                  baseElement.text = cleanElement.text || '';
-                  baseElement.fontSize = Number(cleanElement.fontSize) || 20;
-                  baseElement.fontFamily = Number(cleanElement.fontFamily) || 1;
-                  baseElement.textAlign = cleanElement.textAlign || 'left';
-                  baseElement.verticalAlign = cleanElement.verticalAlign || 'top';
-                  baseElement.containerId = cleanElement.containerId || null;
-                  baseElement.originalText = cleanElement.originalText || cleanElement.text || '';
-                  baseElement.lineHeight = Number(cleanElement.lineHeight) || 1.25;
-                }
-
-                // 为箭头元素添加特有属性
-                if (cleanElement.type === 'arrow' || cleanElement.type === 'line') {
-                  baseElement.points = Array.isArray(cleanElement.points) ? cleanElement.points : [[0, 0], [100, 100]];
-                  baseElement.lastCommittedPoint = cleanElement.lastCommittedPoint || null;
-                  baseElement.startBinding = cleanElement.startBinding || null;
-                  baseElement.endBinding = cleanElement.endBinding || null;
-                  baseElement.startArrowhead = cleanElement.startArrowhead || null;
-                  baseElement.endArrowhead = cleanElement.endArrowhead || 'arrow';
-                }
-
-                // 为自由绘制元素添加特有属性
-                if (cleanElement.type === 'freedraw') {
-                  // 确保points数组格式正确，freedraw需要points数组来定义绘制路径
-                  baseElement.points = Array.isArray(cleanElement.points) ? cleanElement.points : [];
-                  baseElement.pressures = Array.isArray(cleanElement.pressures) ? cleanElement.pressures : [];
-                  baseElement.simulatePressure = Boolean(cleanElement.simulatePressure);
-                  baseElement.lastCommittedPoint = cleanElement.lastCommittedPoint || null;
-                }
-
-                // 添加处理后的元素
-                processedElements.push(baseElement);
-              });
-
-              console.log("🔍 处理后的元素:", processedElements);
-
-              // 直接替换所有元素（移除Scene概念，直接操作元素数组）
-              try {
-                // 确保appState包含必需的collaborators属性
-                const safeAppState = ensureCollaboratorsMap(payload.appState);
-
-                apiRef.current.updateScene({
-                  elements: processedElements,
-                  appState: safeAppState,
-                  files: payload.files || {}
-                });
-                console.log("✅ 画布元素更新成功，元素数量:", processedElements.length);
-
-                // 同步后端数据到IndexedDB
-                try {
-                  await indexedDBService.saveCanvasData(processedElements, payload.appState || {});
-                  console.log("💾 后端数据已同步到IndexedDB");
-                } catch (error) {
-                  console.error("❌ 同步到IndexedDB失败:", error);
-                }
-
-                // 注意：绘制操作不需要同步到后端，因为绘制事件本身就是从后端发起的
-                console.log("ℹ️ 绘制操作来自后端，无需同步");
-              } catch (error) {
-                console.error("❌ 画布元素更新失败:", error);
-                // 尝试仅更新元素
-                try {
-                  const safeAppState = ensureCollaboratorsMap(payload.appState);
-                  apiRef.current.updateScene({
-                    elements: processedElements,
-                    appState: safeAppState
-                  });
-                  console.log("✅ 简化版画布元素更新成功");
-
-                  // 同步简化版更新到IndexedDB
-                  try {
-                    await indexedDBService.saveCanvasData(processedElements, payload.appState || {});
-                    console.log("💾 简化版数据已同步到IndexedDB");
-                  } catch (error) {
-                    console.error("❌ 简化版数据同步到IndexedDB失败:", error);
-                  }
-                } catch (simpleError) {
-                  console.error("❌ 简化版画布元素更新也失败:", simpleError);
-                }
-              }
-            } else {
-              // 清空画布元素
-              const safeAppState = ensureCollaboratorsMap(payload.appState);
-              apiRef.current.updateScene({
-                elements: [],
-                appState: safeAppState,
-                files: payload.files || {}
-              });
-              console.log("⚠️ 画布已清空");
-
-              // 清空IndexedDB中的数据
-              try {
-                await indexedDBService.clearCanvasData();
-                console.log("💾 IndexedDB数据已清空");
-              } catch (error) {
-                console.error("❌ 清空IndexedDB失败:", error);
-              }
-
-              // 注意：清空操作不需要同步到后端，因为清空事件本身就是从后端发起的
-              console.log("ℹ️ 清空操作来自后端，无需同步");
-            }
-          } catch (error) {
-            console.error("❌ 画布元素操作失败:", error);
-          }
-        } else {
-          console.log("❌ apiRef.current 为空，无法更新画布");
-          console.log("🔍 apiRef 状态:", apiRef);
-        }
+        // 使用统一的画布更新处理逻辑
+        await handleCanvasUpdate(payload);
       });
       console.log("✅ 事件监听器设置完成");
     })();
@@ -398,8 +461,15 @@ export function ExcalidrawCanvas() {
             elementsCount: elements ? elements.length : 0,
             appState: appState,
             filesCount: files ? Object.keys(files).length : 0,
-            timestamp: new Date().toISOString()
+            timestamp: new Date().toISOString(),
+            isFromRestore: isUpdatingFromRestore.current
           });
+
+          // 如果是数据恢复触发的onChange，跳过保存
+          if (isUpdatingFromRestore.current) {
+            console.log("ℹ️ 数据恢复触发的onChange，跳过保存");
+            return;
+          }
 
           // 确保elements存在且不为空
           if (!elements) {
@@ -407,53 +477,47 @@ export function ExcalidrawCanvas() {
             return;
           }
 
-          // 自动保存到IndexedDB
-          try {
-            // 转换readonly数组为可变数组
-            const mutableElements = [...elements] as any[];
-            console.log("💾 准备保存到IndexedDB，元素数量:", mutableElements.length);
-            await indexedDBService.saveCanvasData(mutableElements, appState || {});
-            console.log("✅ 画布数据已成功保存到IndexedDB");
-          } catch (error) {
-            console.error("❌ 保存到IndexedDB失败:", error);
-            console.error("❌ 错误详情:", {
-              elementsType: typeof elements,
-              elementsLength: elements ? elements.length : 'N/A',
-              appStateType: typeof appState,
-              error: error
-            });
+          // 创建数据哈希用于去重
+          const mutableElements = [...elements] as any[];
+          const safeAppState = ensureCollaboratorsMap(appState);
+          const canvasData = {
+            elements: mutableElements,
+            appState: safeAppState,
+            files: files || {}
+          };
+          const dataHash = JSON.stringify(canvasData);
+
+          // 如果数据没有变化，跳过保存
+          if (dataHash === lastSaveDataRef.current) {
+            console.log("ℹ️ 数据未变化，跳过保存");
+            return;
           }
 
-          // 同步到后端（支持跨浏览器标签页同步）
-          try {
-            const mutableElements = [...elements] as any[];
-            // 确保appState包含必需的collaborators属性
-            const safeAppState = ensureCollaboratorsMap(appState);
+          // 更新数据哈希
+          lastSaveDataRef.current = dataHash;
 
-            const canvasData = {
-              elements: mutableElements,
-              appState: safeAppState,
-              files: files || {}
-            };
+          // 清除之前的防抖定时器
+          if (saveTimeoutRef.current) {
+            clearTimeout(saveTimeoutRef.current);
+          }
 
-            console.log("📤 同步画布数据到后端，元素数量:", mutableElements.length);
-
-            const response = await fetch('http://localhost:31337/canvas', {
-              method: 'PUT',
-              headers: {
-                'Content-Type': 'application/json'
-              },
-              body: JSON.stringify(canvasData)
-            });
-
-            if (response.ok) {
-              console.log("✅ 画布数据已成功同步到后端");
-            } else {
-              console.error("❌ 同步到后端失败:", response.status, response.statusText);
+          // 设置防抖定时器，延迟保存到本地
+          saveTimeoutRef.current = setTimeout(async () => {
+            try {
+              // 只保存到IndexedDB，不同步到后端
+              console.log("💾 准备保存到本地IndexedDB，元素数量:", mutableElements.length);
+              await indexedDBService.saveCanvasData(mutableElements, safeAppState);
+              console.log("✅ 画布数据已成功保存到本地IndexedDB");
+            } catch (error) {
+              console.error("❌ 本地存储保存失败:", error);
+              console.error("❌ 错误详情:", {
+                elementsType: typeof elements,
+                elementsLength: elements ? elements.length : 'N/A',
+                appStateType: typeof appState,
+                error: error
+              });
             }
-          } catch (error) {
-            console.error("❌ 同步到后端时发生错误:", error);
-          }
+          }, 300); // 300ms 防抖延迟
         }}
       />
 

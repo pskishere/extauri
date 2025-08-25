@@ -189,8 +189,6 @@ class IndexedDBService {
   // 安全保存：带冲突检测的保存
   async safelyUpdateCanvasData(elements: ExcalidrawElement[], appState: Partial<AppState>, sourceTimestamp?: number): Promise<boolean> {
     try {
-      const timestamp = sourceTimestamp || Date.now();
-
       // 检查是否应该更新
       if (sourceTimestamp && !(await this.shouldUpdateData(sourceTimestamp))) {
         console.log('⏭️ 数据时间戳较旧，跳过更新');
